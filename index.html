@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shadow Puppets</title>
+<style>
+  :root{--ink:#120c08;--paper:#f3dfb4;--lamp:#ffcf70;--text:#2b1a0c}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--ink);overflow:hidden;font-family:Georgia,"Iowan Old Style",serif;color:var(--text)}
+  canvas#stage{position:fixed;inset:0;width:100%;height:100%;display:block}
+  video#cam{position:fixed;right:16px;bottom:16px;width:176px;border-radius:6px;transform:scaleX(-1);opacity:.55;border:2px solid rgba(43,26,12,.5);display:none}
+  .hud{position:fixed;left:24px;top:20px;pointer-events:none;color:#f6e3b8;text-shadow:0 1px 8px rgba(20,8,0,.7)}
+  .hud h1{margin:0;font-size:26px;font-weight:700}
+  .hud p{margin:4px 0 0;font-size:16px;font-style:italic}
+  #debugBox{position:fixed;right:16px;top:16px;font:12px/1.4 monospace;color:#f6e3b8;background:rgba(20,8,0,.6);padding:6px 8px;border-radius:4px;display:none;white-space:pre}
+  .guide{position:fixed;left:0;right:0;bottom:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;padding:0 200px 0 24px;pointer-events:none}
+  .guide button{pointer-events:auto;font:inherit;font-size:15px;background:rgba(20,8,0,.55);color:#f6e3b8;border:1.5px solid rgba(246,227,184,.5);border-radius:999px;padding:7px 16px;cursor:pointer}
+  .guide button.on{background:#f6e3b8;color:var(--text)}
+  .guide button:focus-visible,#start:focus-visible{outline:3px solid var(--lamp);outline-offset:3px}
+  #cover{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:radial-gradient(ellipse at 50% 30%,#3a2412,#120c08 70%);color:var(--paper);text-align:center;padding:24px}
+  #cover h2{margin:0;font-size:clamp(34px,6vw,64px);font-weight:700}
+  #cover p{margin:0;max-width:480px;font-size:18px;line-height:1.5;opacity:.85}
+  #start{font:inherit;font-size:19px;background:var(--lamp);color:var(--text);border:0;border-radius:999px;padding:13px 30px;cursor:pointer;font-weight:700}
+  #demo{font:inherit;font-size:15px;background:none;color:var(--paper);border:0;text-decoration:underline;cursor:pointer;opacity:.8}
+  #msg{min-height:1.4em;font-size:15px;color:var(--lamp)}
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<video id="cam" playsinline muted></video>
+<div class="hud"><h1>Shadow Puppets</h1><p id="status">Hold a hand up to the lamp.</p></div>
+<div id="debugBox"></div>
+<div class="guide">
+  <button data-c="bird">flat hand: bird</button>
+  <button data-c="rabbit">bunny ears: rabbit</button>
+  <button data-c="wave">C shape: ocean wave</button>
+  <button data-c="butterfly">hands linked: butterfly</button>
+  <button id="camBtn">show camera</button>
+</div>
+<div id="cover">
+  <h2>Shadow Puppets</h2>
+  <p>Hold up your hands. After five seconds of shadows, your shapes come alive in a trail of pixie dust.</p>
+  <button id="start">Light the lamp</button>
+  <div id="msg"></div>
+  <button id="demo">Try it with the mouse instead</button>
+</div>
+
+<script type="module">
+import {HandLandmarker, FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
+
+const HAND_SECONDS = 5;
+const cv = document.getElementById('stage'), ctx = cv.getContext('2d');
+const video = document.getElementById('cam'), statusEl = document.getElementById('status');
+const cover = document.getElementById('cover'), msg = document.getElementById('msg'), debugBox = document.getElementById("debugBox");
+let W, H, dpr, wall;
+
+function resize(){
+  dpr = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W*dpr; cv.height = H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+  wall = document.createElement('canvas'); wall.width = W; wall.height = H;
+  const w = wall.getContext('2d');
+  const g = w.createRadialGradient(W*.5, H*.2, 20, W*.5, H*.45, Math.max(W,H)*.85);
+  g.addColorStop(0,'#fbe9b8'); g.addColorStop(.5,'#e6c47c'); g.addColorStop(1,'#8a5a2a');
+  w.fillStyle = g; w.fillRect(0,0,W,H);
+  const img = w.getImageData(0,0,W,H), d = img.data;
+  for(let i=0;i<d.length;i+=4){ const n=(Math.random()-.5)*14; d[i]+=n; d[i+1]+=n; d[i+2]+=n*.8; }
+  w.putImageData(img,0,0);
+}
+addEventListener('resize', resize); resize();
+
+/* ---------- pixie dust ---------- */
+const dust = [];
+function spark(x,y,spread,burst){
+  if(dust.length > 700) return;
+  const a = Math.random()*6.283, sp = burst ? 1+Math.random()*4 : Math.random()*.9;
+  dust.push({x:x+(Math.random()-.5)*spread, y:y+(Math.random()-.5)*spread,
+    vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-(burst?0:.3),
+    life:0, max:(burst?60:45)+Math.random()*70, s:1.5+Math.random()*3.5, star:Math.random()<.3, seed:Math.random()*9});
+}
+function burst(x,y){ for(let i=0;i<50;i++) spark(x,y,20,true); }
+function starPath(x,y,r){
+  ctx.beginPath(); ctx.moveTo(x,y-r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.quadraticCurveTo(x,y,x,y+r);
+  ctx.quadraticCurveTo(x,y,x-r,y); ctx.quadraticCurveTo(x,y,x,y-r);
+}
+function drawDust(){
+  for(let i=dust.length-1;i>=0;i--){
+    const d = dust[i]; d.life++; if(d.life>d.max){ dust.splice(i,1); continue; }
+    d.x += d.vx; d.y += d.vy; d.vy += .025; d.vx *= .98;
+    const u = d.life/d.max, tw = .65+.35*Math.sin(d.life*.5+d.seed), r = d.s*(1-u*.5)*tw;
+    ctx.globalAlpha = (1-u)*.95;
+    ctx.shadowColor = 'rgba(255,190,40,.9)'; ctx.shadowBlur = 10;
+    ctx.fillStyle = '#ffd34d'; ctx.strokeStyle = 'rgba(140,70,0,.5)'; ctx.lineWidth = 1;
+    if(d.star){ starPath(d.x,d.y,r*2.4); ctx.fill(); ctx.stroke(); }
+    else { ctx.beginPath(); ctx.arc(d.x,d.y,r,0,7); ctx.fill(); ctx.stroke(); }
+    ctx.shadowBlur = 0; ctx.fillStyle = '#fffbe6'; ctx.beginPath(); ctx.arc(d.x,d.y,r*.4,0,7); ctx.fill();
+  }
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+}
+
+/* ---------- hand analysis ---------- */
+const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+function analyse(lm){
+  const g = lm.map(q=>({x:q.x*640, y:q.y*480}));            // true proportions, for shape tests
+  const pts = lm.map(q=>({x:(1-q.x)*W, y:q.y*H}));           // mirrored screen position
+  const r = [[8,6],[12,10],[16,14],[20,18]].map(([t,p]) => dist(g[t],g[0]) / dist(g[p],g[0]));
+  const gs = dist(g[0],g[9]);
+  const h = {
+    pts, r, d: dist(g[4],g[8]) / gs,
+    cx:(pts[0].x+pts[5].x+pts[17].x)/3, cy:(pts[0].y+pts[5].y+pts[17].y)/3,
+    size: dist(pts[0],pts[9]), dx: pts[9].x-pts[0].x, dy: pts[9].y-pts[0].y
+  };
+  h.rot = Math.atan2(h.dy,h.dx) + Math.PI/2;
+  h.kind = classify(h);
+  return h;
+}
+function classify(h){
+  const {r,d,dx,dy} = h;
+  if(r.every(v=>v>1.3) && Math.abs(dx) > Math.abs(dy)*1.1) return 'bird';          // flat, sideways hand
+  if(r[0]>1.05 && r[1]>1.05 && r[2]<1 && r[3]<1) return 'rabbit';                  // two fingers up, others curled
+  if(r[1]>.95 && r[1]<1.5 && r[2]>=.98 && d>.45 && d<1.6) return 'wave';          // curved fingers + thumb = C
+  return null;
+}
+
+/* ---------- puppets ---------- */
+const puppets = [{},{},{}];     // two single-hand slots + one shared butterfly slot
+const MULT = {bird:2.1, rabbit:2.1, wave:1.9, butterfly:1.4};
+const TILT = {bird:1, rabbit:1, wave:.3, butterfly:.6};
+function feed(i, kind, x, y, rot, size, dir=1){
+  const p = puppets[i];
+  if(p.kind !== kind){ burst(x,y); if(!p.kind){ p.x=x; p.y=y; p.rot=rot; p.size=size; p.vx=0; p.lx=undefined; p.t=Math.random()*9; } }
+  p.vx = p.vx*.7 + (x-p.x)*.3;
+  p.x += (x-p.x)*.35; p.y += (y-p.y)*.35;
+  p.rot += (rot-p.rot)*.3; p.size += (size-p.size)*.2; p.dir = dir;
+  p.kind = kind; p.seen = performance.now();
+}
+function eye(x,y,r){ ctx.save(); ctx.fillStyle='rgba(255,226,160,.9)'; ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill(); ctx.restore(); }
+
+function bird(p,t){
+  const sp = Math.min(Math.abs(p.vx)/20,1), ph = t*(7+sp*6);
+  ctx.beginPath(); ctx.ellipse(0,0,.5,.27,-.1,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(.5,-.14,.16,0,7); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(.62,-.2); ctx.lineTo(.86,-.1); ctx.lineTo(.63,-.05); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-.4,-.02); ctx.lineTo(-.95,-.12); ctx.lineTo(-.9,.04); ctx.lineTo(-.95,.16); ctx.lineTo(-.4,.1); ctx.fill();
+  for(const o of [0,.5]){
+    ctx.save(); ctx.translate(-.05,-.08); ctx.scale(1,Math.sin(ph-o));
+    ctx.beginPath(); ctx.moveTo(.15,0); ctx.quadraticCurveTo(.05,-.65,-.55,-.95);
+    ctx.quadraticCurveTo(-.4,-.45,-.6,-.05); ctx.quadraticCurveTo(-.25,.02,.15,0); ctx.fill(); ctx.restore();
+  }
+  eye(.54,-.17,.035);
+}
+function rabbit(p,t){
+  const wig = Math.sin(t*5)*.12 + Math.min(Math.abs(p.vx)/25,1)*.35*Math.sin(t*14);
+  for(const s of [-1,1]){
+    ctx.save(); ctx.translate(s*.13,-.22); ctx.rotate(s*.16 + wig*.5 + (s>0?.04:-.04)*wig);
+    ctx.beginPath(); ctx.ellipse(0,-.38,.095,.42,0,0,7); ctx.fill(); ctx.restore();
+  }
+  ctx.beginPath(); ctx.ellipse(0,.02,.31,.27,0,0,7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0,.22,.2,.15,0,0,7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0,.68,.38,.34,0,0,7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(-.22,.98,.17,.07,0,0,7); ctx.ellipse(.22,.98,.17,.07,0,0,7); ctx.fill();
+  eye(-.13,0,.03); eye(.13,0,.03);
+}
+function wave(p,t){
+  const sw = 1+Math.sin(t*2.2)*.07;
+  for(const [ox,oy,s,a] of [[-.35,.15,.75,.55],[0,0,1,1]]){
+    ctx.save(); ctx.globalAlpha *= a; ctx.translate(ox,oy); ctx.scale(s,s*sw);
+    ctx.beginPath(); ctx.moveTo(-1.15,.75); ctx.lineTo(-1.15,.25);
+    ctx.bezierCurveTo(-.6,.2,-.35,-.25,.05,-.65);
+    ctx.bezierCurveTo(.4,-.95,.9,-.8,.88,-.3);
+    ctx.bezierCurveTo(.7,-.55,.45,-.5,.3,-.28);
+    ctx.bezierCurveTo(.35,.1,.7,.3,1.15,.4);
+    ctx.lineTo(1.15,.75); ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+  ctx.save(); ctx.fillStyle='rgba(255,226,160,.85)';
+  for(let i=0;i<5;i++){ const a=t*1.5+i*1.3; ctx.beginPath(); ctx.arc(.55+Math.cos(a)*.2,-.55+Math.sin(a*1.3)*.15,.025,0,7); ctx.fill(); }
+  ctx.restore();
+}
+function butterfly(p,t){
+  const f = .45+.55*Math.abs(Math.cos(t*5));
+  for(const s of [-1,1]){
+    ctx.save(); ctx.scale(s*f,1);
+    ctx.beginPath(); ctx.ellipse(.62,-.3,.62,.4,-.45,0,7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(.45,.4,.4,.3,.5,0,7); ctx.fill();
+    eye(.8,-.4,.07); eye(.55,.45,.05); ctx.restore();
+  }
+  ctx.beginPath(); ctx.ellipse(0,0,.07,.45,0,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(0,-.5,.075,0,7); ctx.fill();
+  ctx.lineWidth = .025; ctx.strokeStyle = '#0e0905'; ctx.beginPath();
+  ctx.moveTo(-.02,-.55); ctx.quadraticCurveTo(-.15,-.85,-.3,-.8);
+  ctx.moveTo(.02,-.55); ctx.quadraticCurveTo(.15,-.85,.3,-.8); ctx.stroke();
+}
+const ART = {bird, rabbit, wave, butterfly};
+
+function drawPuppet(p, now){
+  if(!p.kind) return;
+  const age = now - p.seen;
+  if(age > 450){ p.kind = null; return; }
+  const fade = age < 200 ? 1 : 1-(age-200)/250;
+  const k = Math.max(p.size,60)*MULT[p.kind], t = now/1000+p.t;
+  const hop = p.kind==='rabbit' ? -Math.abs(Math.sin(t*9))*Math.min(Math.abs(p.vx)/20,1)*k*.2 : 0;
+  ctx.save(); ctx.globalAlpha = fade;
+  ctx.translate(p.x, p.y+hop); ctx.rotate(p.rot*TILT[p.kind]); ctx.scale(k*p.dir, k);
+  ctx.fillStyle = '#0e0905'; ctx.shadowColor = 'rgba(14,9,5,.55)'; ctx.shadowBlur = 14;
+  ART[p.kind](p,t);
+  ctx.restore();
+  // pixie dust trail along the path travelled since last frame
+  const lx = p.lx ?? p.x, ly = p.ly ?? p.y, sp = Math.hypot(p.x-lx, p.y-ly);
+  const n = Math.min(2 + sp*.35, 16)|0, tail = p.kind==='bird' ? -p.dir*k*.7 : 0;
+  for(let i=1;i<=n;i++){ const u=i/n; spark(lx+(p.x-lx)*u+tail, ly+(p.y-ly)*u, k*.45); }
+  p.lx = p.x; p.ly = p.y;
+}
+
+/* ---------- the first five seconds: your hands as shadows ---------- */
+function drawHand(h){
+  const P = h.pts, s = h.size;
+  ctx.save(); ctx.globalAlpha = .92; ctx.fillStyle = ctx.strokeStyle = '#0e0905';
+  ctx.shadowColor = 'rgba(14,9,5,.55)'; ctx.shadowBlur = 14; ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.beginPath(); [0,1,5,9,13,17].forEach((i,n)=> n ? ctx.lineTo(P[i].x,P[i].y) : ctx.moveTo(P[i].x,P[i].y));
+  ctx.closePath(); ctx.fill(); ctx.lineWidth = s*.22; ctx.stroke();
+  [[1,2,3,4,.3],[5,6,7,8,.25],[9,10,11,12,.25],[13,14,15,16,.23],[17,18,19,20,.2]].forEach(c=>{
+    ctx.lineWidth = s*c[4]; ctx.beginPath(); ctx.moveTo(P[c[0]].x,P[c[0]].y);
+    for(let i=1;i<4;i++) ctx.lineTo(P[c[i]].x,P[c[i]].y); ctx.stroke();
+  });
+  ctx.restore();
+}
+
+/* ---------- tracking loop ---------- */
+let landmarker = null, mode = 'cam', demoKind = 'bird', lastVideoT = -1, showDbg = false;
+const mouse = {x:innerWidth/2, y:innerHeight/2};
+const session = {on:false, start:0, last:0};
+let hands = [], handPhase = false;
+
+function pollHands(now){
+  if(!landmarker || video.readyState < 2 || video.currentTime === lastVideoT) return;
+  lastVideoT = video.currentTime;
+  hands = landmarker.detectForVideo(video, now).landmarks.slice(0,2).map(analyse);
+  if(hands.length){ if(!session.on){ session.on = true; session.start = now; } session.last = now; }
+  else if(session.on && now-session.last > 1000){ session.on = false; }
+  handPhase = session.on && now-session.start < HAND_SECONDS*1000;
+
+  if(showDbg) debugBox.textContent = hands.map(h=>`r ${h.r.map(v=>v.toFixed(2)).join(' ')}  gap ${h.d.toFixed(2)}  ${h.kind||'-'}`).join('\n') || 'no hands';
+  if(handPhase){
+    statusEl.textContent = `Shadows for ${Math.ceil(HAND_SECONDS-(now-session.start)/1000)}s. Get your shapes ready.`;
+    return;
+  }
+  let butter = false;
+  if(hands.length===2){
+    const [a,b] = hands, s = (a.size+b.size)/2;
+    const pp = dist({x:a.cx,y:a.cy},{x:b.cx,y:b.cy});
+    butter = dist(a.pts[4],b.pts[4]) < s || pp < s*2.2;
+    if(butter){
+      let dx = b.cx-a.cx, dy = b.cy-a.cy; if(dx<0){ dx=-dx; dy=-dy; }
+      feed(2,'butterfly',(a.cx+b.cx)/2,(a.cy+b.cy)/2, Math.atan2(dy,dx), pp*.45+s*.3);
+      puppets[0].kind = puppets[1].kind = null;
+    }
+  }
+  if(!butter){
+    puppets[2].kind = null;
+    hands.forEach((h,i)=>{
+      if(!h.kind) return;
+      let rot = h.rot, dir = 1;
+      if(h.kind==='bird'){ dir = h.dx>0?1:-1; rot = Math.atan2(h.dy,Math.abs(h.dx))*dir; }
+      feed(i, h.kind, h.cx, h.cy, rot, h.size, dir);
+    });
+  }
+  const names = {bird:'bird', rabbit:'rabbit', wave:'ocean wave', butterfly:'butterfly'};
+  const live = puppets.filter(p=>p.kind).map(p=>names[p.kind]);
+  statusEl.textContent = live.length ? 'A '+live.join(' and a ')+' on the wall.' : (hands.length ? 'Try bunny ears, a flat hand, a C or linked hands.' : 'Hold a hand up to the lamp.');
+}
+
+function frame(now){
+  ctx.drawImage(wall,0,0);
+  if(mode==='cam'){ pollHands(now); if(handPhase) hands.forEach(drawHand); }
+  else feed(0, demoKind, mouse.x, mouse.y, 0, 90);
+  if(!handPhase) puppets.forEach(p=>drawPuppet(p, now));
+  drawDust();
+  const v = ctx.createRadialGradient(W/2,H*.4,Math.min(W,H)*.35,W/2,H*.5,Math.max(W,H)*.8);
+  v.addColorStop(0,'rgba(0,0,0,0)'); v.addColorStop(1,'rgba(40,18,4,.45)');
+  ctx.fillStyle = v; ctx.fillRect(0,0,W,H);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- start-up and controls ---------- */
+document.getElementById('start').onclick = async () => {
+  let step = 'loading hand tracking';
+  try{
+    if(!navigator.mediaDevices?.getUserMedia) throw Object.assign(new Error('This page is not secure. Open it from http://localhost or https, not as a file.'),{name:'InsecureContext'});
+    msg.textContent = 'Loading hand tracking…';
+    const fs = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    const model = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+    for(const delegate of ['GPU','CPU']){
+      try{ landmarker = await HandLandmarker.createFromOptions(fs, {baseOptions:{modelAssetPath:model, delegate}, runningMode:'VIDEO', numHands:2}); break; }
+      catch(err){ if(delegate==='CPU') throw err; console.warn('GPU failed, trying CPU', err); }
+    }
+    step = 'opening the camera'; msg.textContent = 'Waiting for camera…';
+    video.srcObject = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'}});
+    await video.play(); mode = 'cam'; cover.style.display = 'none';
+  }catch(e){
+    console.error(e);
+    const hint = e.name==='NotAllowedError' ? 'Camera access was blocked. Click the camera or lock icon in the address bar, allow the camera, then reload.'
+      : e.name==='NotFoundError' ? 'No camera was found.'
+      : e.name==='NotReadableError' ? 'Another app is using the camera. Close it and reload.'
+      : e.name==='InsecureContext' ? e.message
+      : step==='loading hand tracking' ? 'The tracking model could not load. Check your internet connection.' : '';
+    msg.textContent = `Problem while ${step}: ${hint} (${e.name}: ${e.message})`;
+  }
+};
+document.getElementById('demo').onclick = () => { mode='mouse'; handPhase=false; cover.style.display='none'; statusEl.textContent='Mouse mode: pick a puppet below.'; setBtn(); };
+addEventListener('pointermove', e => { mouse.x=e.clientX; mouse.y=e.clientY; });
+const btns = [...document.querySelectorAll('.guide [data-c]')];
+function setBtn(){ btns.forEach(b=>b.classList.toggle('on', mode==='mouse' && b.dataset.c===demoKind)); }
+btns.forEach(b=>b.onclick=()=>{ if(mode==='mouse'){ demoKind=b.dataset.c; setBtn(); } });
+addEventListener('keydown', e => {
+  const k = {1:'bird',2:'rabbit',3:'wave',4:'butterfly'}[e.key];
+  if(k && mode==='mouse'){ demoKind=k; setBtn(); }
+  if(e.key==='d'){ showDbg=!showDbg; debugBox.style.display = showDbg?'block':'none'; }
+});
+document.getElementById('camBtn').onclick = e => {
+  const on = video.style.display !== 'block';
+  video.style.display = on ? 'block' : 'none'; e.target.textContent = on ? 'hide camera' : 'show camera';
+};
+</script>
+</body>
+</html>
